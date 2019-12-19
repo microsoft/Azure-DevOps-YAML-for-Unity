@@ -120,7 +120,7 @@ We have already done the hard work for you! We are providing you with an [Azure 
 
 This build pipeline is designed for ARM UWP projects (what the HoloLens 2 uses), running Unity 2019.x, with MRTK Foundation. It is customizable to suit older versions of Unity, Visual Studio, and HoloLens 1. 
 
-# 👉🏼[Download ```Azure-Pipelines.yml``` from this ReadMe.md👈🏼](/azure-pipelines.yml)
+# 👉🏼[Download ```Azure-Pipelines.yml``` from this file👈🏼](/azure-pipelines.yml)
 
 ## Upload ```Azure-Pipelines.yml``` to your ADO Repo!
 The easiest way to upload a file to ADO is to click the "Upload file(s)" button from your Repos page. Then you can simply drag and drop or browse for our ```azure-pipelines.yml``` file.
