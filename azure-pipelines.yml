@@ -1,0 +1,329 @@
+# This build pipeline is designed for ARM UWP projects, running Unity 2019.x or later, with MRTK Foundation 
+# If using 2018.x or earlier: Change unity.installComponents to 'Windows, UWP_IL2CPP'
+# If not using MRTK Foundation: Change unity.executeMethod to your build method (We recommend basing off the one in MRTK Foundation)
+# If you want to build x86 UWP builds: In theory should just be able to change vs.appxPlatforms, but it's a TODO
+
+# This pipeline depends on secret variables that you must define within your Azure DevOps!
+#   unity.username  = <Your Unity account username / email>
+#   unity.password  = <Your Unity account password>
+#   unity.serialkey = <The serial key for your Unity pro licence>
+# Without all three, this pipeline will fail to run!
+
+# Unity will be licensed, used, and then unlicensed during the unity and unitytests jobs in this pipeline.
+# A Pro license works on 2 machines, and in theory this pipeline will only use one licence at a time.
+# However, should there be unexpected errors and deactivation doesn't complete properly, you may need to log into your Unity account and deactivate all.
+
+# Variables predefined for this build process:
+variables:
+
+  # If true, will run tests, otherwise skip them. If you do not have tests, set to false to increase build speed.
+  runTests: false
+
+  # The path to the folder which contains the Assets folder of the project.
+  # If your Unity project is located in a subfolder of your repo, make sure it is reflected in this.
+  unity.projectPath:        '$(System.DefaultWorkingDirectory)/'
+
+  # If you are using Unity 2019 or later, leave this alone!
+  unity.installComponents:  'Windows, UWP'
+  # If you are using Unity 2018 or earlier, comment out the above and uncomment below:
+  #  unity.installComponents:  'Windows, UWP_IL2CPP'
+  # Explanation: In Unity 2019 and later, .NET scripting was removed. You no longer need to specify 'UWP_IL2CPP', it's now simply 'UWP'!
+
+  # The build method of the Unity project. This assumes you have MRTK in your project, and uses its build script.
+  # If you want to customize your build script, change the method name here:
+  unity.executeMethod:      'Microsoft.MixedReality.Toolkit.Build.Editor.UnityPlayerBuildTools.StartCommandLineBuild'
+
+  # Are we buolding an .appx for x86 or ARM?
+  # TODO: Theoretically, could expect to use 'x86|ARM' to build for both HL1 and 2, but yet to get that to work.
+  vs.appxPlatforms:         'ARM'
+
+  # I would not expect you to have to change the rest of these unless you had a special reason:
+  unity.targetBuild:        'WindowsStoreApps'
+  unity.outputPath:         '/Builds/WSAPlayer'
+  unity.editorPath:         '/Editor/Unity.exe'
+  vs.packagePath:           '/AppPackages'
+
+  # This also needs to be passed to the install template, along with unity.projectPath
+  unity.installFolder:      'C:/Program Files/Unity/Hub/Editor/'
+  
+# What causes us to build? A push to master or a feature branch causes us to build...
+trigger:
+  batch: true
+  branches:
+    include:
+    - master
+    - feature/*
+
+# Windows machine with Visual Studio 2019:
+pool:
+  vmImage: 'windows-2019'
+
+
+# Two jobs in this pipeline:
+# - Build the Unity
+# - Run Unity tests
+# Note: The build job can be uncommented and broken up into two jobs, for when that makes sense.
+jobs:
+
+# Install Unity (from cache or download) then create Visual Studio project from Unity
+- job: unity
+  displayName: Unity Build
+  variables:
+    installCached: false
+  # Try to ensure that we have the right secrets set up to continue, otherwise fail the job:
+  condition: or( not(variables['unity.username']), not(variables['unity.password']), not(variables['unity.serialKey']) )
+  steps:
+  # What version of Unity does the project say that it wants?:
+  - task: UnityGetProjectVersionTask@1
+    name: unitygetprojectversion
+    displayName: Calling UnityGetProjectVersionV1 from unity-azure-pipelines-tasks extension
+    inputs:
+      unityProjectPath: '$(unity.projectPath)'
+
+# TODO: This is the start of code that is repeated in other jobs, and ought to be done via a seperate file template.
+  # Do we have that Unity installation cached? If so, install from cache:
+  # (Note: The key is the hashed contents of the ProjectVersion.txt file)
+  # What is this? See https://docs.microsoft.com/en-us/azure/devops/pipelines/caching/index?view=azure-devops
+  - task: CacheBeta@0
+    displayName: Check if Unity installation is cached
+    inputs:
+      key: $(Agent.OS) | "$(unitygetprojectversion.projectVersion)" | "$(unity.installComponents)"
+      path: "$(unity.installFolder)$(unitygetprojectversion.projectVersion)"
+      cacheHitVar: installCached
+
+  # Install the Unity setup module (if we aren't cached):
+  - task: PowerShell@2  
+    displayName: Install Unity
+    condition: and(succeeded(), ne(variables['installCached'], true))
+    inputs:
+      targetType: 'inline'
+      script: |
+        Install-Module -Name UnitySetup -AllowPrerelease -Force -AcceptLicense
+
+  # Download and run the installer for Unity Components defined in unity.installComponents:
+  - task: PowerShell@2
+    displayName: Installing Unity Components '$(unity.installComponents)'
+    condition: and(succeeded(), ne(variables['installCached'], true))
+    inputs:
+      targetType: 'inline'
+      script: |   
+        Install-UnitySetupInstance -Installers (Find-UnitySetupInstaller -Version '$(unitygetprojectversion.projectVersion)' -Components $(unity.installComponents)) -Verbose
+# TODO: This is the end of code that is repeated in other jobs, and ought to be done via a seperate file template.
+
+  # Activate the Unity license (In theory, should deactivate the licence after use!):
+  - task: UnityActivateLicenseTask@1
+    displayName: Calling UnityActivateLicenseTask@1 from unity-azure-pipelines-tasks extension
+    inputs:
+      username: '$(unity.username)'
+      password: '$(unity.password)'
+      serial: '$(unity.serialkey)'
+      unityEditorsPathMode: 'unityHub'
+      unityProjectPath: '$(unity.projectPath)'
+
+  # Build the project with Unity using the script defined in unity.executeMethod:
+  - task: UnityBuildTask@3
+    displayName: Calling UnityBuildTask@3 from unity-azure-pipelines-tasks extension
+    name: runbuild
+    inputs:
+      buildScriptType: existing
+      scriptExecuteMethod: '$(unity.executeMethod)'
+      buildTarget: '$(unity.targetBuild)'
+      unityProjectPath: '$(unity.projectPath)'
+      outputPath: '$(Build.BinariesDirectory)'
+
+  # Publish the Solution folder:
+  - task: PublishPipelineArtifact@0
+    displayName: 'Publish Pipeline Artifact'
+    inputs:
+      artifactName: 'sln'
+      targetPath: '$(unity.projectPath)$(unity.outputPath)'
+
+
+# Until we have a Unity serial key management system, the unity and slnbuild jobs can be merged for speed.
+# # Build the Visual Studio solution generated from the previous job and create a package.
+# - job: slnbuild
+#   displayName: Build Visual Studio project
+#   dependsOn: unity
+#   condition: succeeded()
+#   variables:
+#     installCached: false
+#     unityversion: $[ dependencies.unity.outputs['unitygetprojectversion.projectVersion'] ]
+#   steps:
+#   # Skip checking out repository
+#   - checkout: none 
+
+#   # Download artifacts from last job
+#   - task: DownloadPipelineArtifact@2
+#     displayName: 'Download Pipeline Artifacts'
+#     inputs:
+#       artifactName: 'sln'
+#       targetPath: $(Build.SourcesDirectory)
+
+# # TODO: This is the start of code that is repeated from the unity job, and ought to be done via a seperate file template.
+#   # Do we have that Unity installation cached? If so, install from cache:
+#   # (Note: The key is the hashed contents of the ProjectVersion.txt file)
+#   # What is this? See https://docs.microsoft.com/en-us/azure/devops/pipelines/caching/index?view=azure-devops
+#   - task: CacheBeta@0
+#     displayName: Check if Unity installation is cached
+#     inputs:
+#       key: $(Agent.OS) | "$(unityversion)" | "$(unity.installComponents)"
+#       path: "$(unity.installFolder)$(unityversion)"
+#       cacheHitVar: installCached
+
+#   # Install the Unity setup module (if we aren't cached):
+#   - task: PowerShell@2  
+#     displayName: Install Unity
+#     condition: and(succeeded(), ne(variables['installCached'], true))
+#     inputs:
+#       targetType: 'inline'
+#       script: |
+#         Install-Module -Name UnitySetup -AllowPrerelease -Force -AcceptLicense
+
+#   # Download and run the installer for Unity Components defined in unity.installComponents:
+#   - task: PowerShell@2
+#     displayName: Installing Unity Components '$(unity.installComponents)'
+#     condition: and(succeeded(), ne(variables['installCached'], true))
+#     inputs:
+#       targetType: 'inline'
+#       script: |   
+#         Install-UnitySetupInstance -Installers (Find-UnitySetupInstaller -Version '$(unityversion)' -Components $(unity.installComponents)) -Verbose
+# # TODO: This is the end of code that is repeated from the unity job, and ought to be done via a seperate file template.
+# Uncomment the above, and change '$(unity.projectPath)$(unity.outputPath)' below to '$(Build.SourcesDirectory)' to resume two seperate jobs
+
+  # Find, download, and cache NuGet:
+  - task: NuGetToolInstaller@1
+    displayName: 'Install NuGet'
+
+  # Restore the NuGet packages for the solution:
+  - task: NuGetCommand@2
+    displayName: 'NuGet restore'
+    inputs:
+      restoreSolution: '$(unity.projectPath)$(unity.outputPath)/*.sln' # Change to '$(unity.projectPath)$(unity.outputPath)/*.sln' to resume two jobs
+
+  # Build the solution with Visual Studio to make an .appx:
+  - task: MSBuild@1
+    displayName: 'Build solution'
+    inputs:
+      solution: '$(unity.projectPath)$(unity.outputPath)' # Change to '$(unity.projectPath)$(unity.outputPath)' to resume two jobs
+      configuration: Release
+      msbuildArguments: '/p:AppxBundle=Always /p:AppxBundlePlatforms="$(vs.appxPlatforms)"'
+
+  # Publish the package (.appxbundle/.msixbundle) that we just built:
+  - task: PublishPipelineArtifact@0
+    displayName: 'Publish Pipeline Artifact'
+    inputs:
+      artifactName: 'apppackages'
+      targetPath: '$(unity.projectPath)$(unity.outputPath)$(vs.packagePath)'  # Change to '$(unity.projectPath)$(unity.outputPath)$(vs.packagePath)' to resume two jobs
+
+
+# Build the Visual Studio solution generated from the previous job and create a package.
+- job: unitytests
+  dependsOn: unity
+  condition: and(succeeded(), eq(variables['runTests'], 'true'))
+  displayName: Unity Tests
+  variables:
+    installCached: false
+  steps:
+  # What version of Unity does the project say that it wants?:
+  - task: UnityGetProjectVersionTask@1
+    name: unitygetprojectversion
+    displayName: Calling UnityGetProjectVersionV1 from unity-azure-pipelines-tasks extension
+    inputs:
+      unityProjectPath: '$(unity.projectPath)'
+
+# TODO: This is the start of code that is repeated from the unity job, and ought to be done via a seperate file template.
+  # Do we have that Unity installation cached? If so, install from cache:
+  # (Note: The key is the hashed contents of the ProjectVersion.txt file)
+  # What is this? See https://docs.microsoft.com/en-us/azure/devops/pipelines/caching/index?view=azure-devops
+  - task: CacheBeta@0
+    displayName: Check if Unity installation is cached
+    inputs:
+      key: $(Agent.OS) | "$(unitygetprojectversion.projectVersion)" | "$(unity.installComponents)"
+      path: "$(unity.installFolder)$(unitygetprojectversion.projectVersion)"
+      cacheHitVar: installCached
+
+  # Install the Unity setup module (if we aren't cached):
+  - task: PowerShell@2  
+    displayName: Install Unity
+    condition: and(succeeded(), ne(variables['installCached'], true))
+    inputs:
+      targetType: 'inline'
+      script: |
+        Install-Module -Name UnitySetup -AllowPrerelease -Force -AcceptLicense
+
+  # Download and run the installer for Unity Components defined in unity.installComponents:
+  - task: PowerShell@2
+    displayName: Installing Unity Components '$(unity.installComponents)'
+    condition: and(succeeded(), ne(variables['installCached'], true))
+    inputs:
+      targetType: 'inline'
+      script: |   
+        Install-UnitySetupInstance -Installers (Find-UnitySetupInstaller -Version '$(unitygetprojectversion.projectVersion)' -Components $(unity.installComponents)) -Verbose
+# TODO: This is the end of code that is repeated from the unity job, and ought to be done via a seperate file template.
+
+  # Activate the Unity license (In theory, should deactivate the licence after use!):
+  - task: UnityActivateLicenseTask@1
+    displayName: Calling UnityActivateLicenseTask@1 from unity-azure-pipelines-tasks extension
+    inputs:
+      username: '$(unity.username)'
+      password: '$(unity.password)'
+      serial: '$(unity.serialkey)'
+      unityEditorsPathMode: 'unityHub'
+      unityProjectPath: '$(unity.projectPath)'
+
+  # Test scripts copied from the MRTK pipeline test script, located here:
+  # https://github.com/microsoft/MixedRealityToolkit-Unity/blob/mrtk_release/pipelines/templates/tests.yml
+  # NOTE: If you do not have Unit Tests in your project, you can speed up build times by changing runTests to false.
+
+  # Edit mode tests:
+  # By default, this is left commented out. Can uncomment if you have edit mode tests in your project.
+  # - powershell: |   
+  #     Write-Host "======================= EditMode Tests ======================="
+
+  #     $logFile = New-Item -Path .\editmode-test-run.log -ItemType File -Force
+
+  #     $proc = Start-Process -FilePath "$(unity.installFolder)$(unitygetprojectversion.projectVersion)$(unity.editorPath)" -ArgumentList "-projectPath $(unity.projectPath) -runTests -testPlatform editmode -batchmode -logFile $($logFile.Name) -editorTestsResultFile .\test-editmode-default.xml" -PassThru
+  #     $ljob = Start-Job -ScriptBlock { param($log) Get-Content "$log" -Wait } -ArgumentList $logFile.FullName
+
+  #     while (-not $proc.HasExited -and $ljob.HasMoreData)
+  #     {
+  #         Receive-Job $ljob
+  #         Start-Sleep -Milliseconds 200
+  #     }
+  #     Receive-Job $ljob
+
+  #     Stop-Job $ljob
+
+  #     Remove-Job $ljob
+  #     Stop-Process $proc
+  #   displayName: 'Run EditMode tests'
+
+  # Play mode tests:
+  - powershell: |
+      Write-Host "======================= PlayMode Tests ======================="
+
+      $logFile = New-Item -Path .\playmode-test-run.log -ItemType File -Force
+
+      $proc = Start-Process -FilePath "$(unity.installFolder)$(unitygetprojectversion.projectVersion)$(unity.editorPath)" -ArgumentList "-projectPath $(unity.projectPath) -runTests -testPlatform playmode -batchmode -logFile $($logFile.Name) -editorTestsResultFile .\test-playmode-default.xml" -PassThru
+      $ljob = Start-Job -ScriptBlock { param($log) Get-Content "$log" -Wait } -ArgumentList $logFile.FullName
+
+      while (-not $proc.HasExited -and $ljob.HasMoreData)
+      {
+          Receive-Job $ljob
+          Start-Sleep -Milliseconds 200
+      }
+      Receive-Job $ljob
+
+      Stop-Job $ljob
+
+      Remove-Job $ljob
+      Stop-Process $proc
+    displayName: 'Run PlayMode tests'
+
+  # Publish test results:
+  - task: PublishTestResults@2
+    displayName: 'Publish Test Results'
+    inputs:
+      testResultsFormat: NUnit
+      testResultsFiles: 'test*.xml'
+      failTaskOnFailedTests: true
